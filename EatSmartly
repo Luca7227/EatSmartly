@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guida all'uso dell'applicazione Flask per la ricerca di ricette</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
+        }
+        header, footer {
+            background-color: #333;
+            color: white;
+            text-align: center;
+            padding: 1em 0;
+        }
+        main {
+            padding: 2em;
+        }
+        h1, h2, h3 {
+            color: #333;
+        }
+        p {
+            line-height: 1.6;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Guida all'uso dell'applicazione Flask per la ricerca di ricette</h1>
+    </header>
+    <main>
+        <section>
+            <h2>Descrizione dell'Applicazione</h2>
+            <p>Questa applicazione Flask permette di cercare ricette basate su ingredienti specifici, tipo di dieta e allergeni. Utilizza l'API di Edamam per ottenere le ricette.</p>
+        </section>
+        <section>
+            <h2>Codice dell'Applicazione</h2>
+            <p>Il codice Python per l'applicazione è il seguente:</p>
+            <pre>
+<code>from flask import Flask, request, render_template_string, redirect, url_for
+import requests
+from pyngrok import ngrok
+import threading
+import time
+import traceback
+import pickle
+
+app = Flask(__name__)
+
+EDAMAM_APP_ID = '146302ab'
+EDAMAM_APP_KEY = '7044c6ce64d1d84aa262285a1204faf1'
+
+global_results = {}
+
+def search_recipes(ingredients, diet_type, allergens):
+    url = 'https://api.edamam.com/search'
+    params = {
+        'q': ','.join(ingredients),
+        'app_id': EDAMAM_APP_ID,
+        'app_key': EDAMAM_APP_KEY,
+        'health': diet_type,
+        'to': 20
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+    results = {
+        'appetizers': [],
+        'main_courses': [],
+        'second_courses': [],
+        'side_dishes': [],
+        'desserts': []
+    }
+    for hit in data.get('hits', []):
+        recipe = hit['recipe']
+        recipe_ingredients = set([ing.lower() for ing in recipe['ingredientLines']])
+        missing_ingredients = recipe_ingredients - set(ingredients)
+        if any(allergen in recipe_ingredients for allergen in allergens):
+            continue
+        category = recipe.get('dishType', [''])[0].lower()
+        dish = {
+            'name': recipe['label'],
+            'ingredients': recipe['ingredientLines'],
+            'missing': list(missing_ingredients),
+            'link': recipe['url'],
+            'image': recipe['image']
+        }
+        if category in ['starter', 'appetizer']:
+            results['appetizers'].append(dish)
+        elif category in ['main course', 'main dish']:
+            results['main_courses'].append(dish)
+        elif category in ['second course', 'second dish']:
+            results['second_courses'].append(dish)
+        elif category in ['side dish']:
+            results['side_dishes'].append(dish)
+        elif category in ['dessert']:
+            results['desserts'].append(dish)
+    return results
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    global global_results
+    results = {}
+    ingredients = []
+    diet_type = ''
+    allergens = []
+    if request.method == 'POST':
+        try:
+            ingredients = request.form.get('ingredients').split(',')
+            ingredients = [ingredient.strip().lower() for ingredient in ingredients]
+            diet_type = request.form.get('diet_type')
+            allergens = request.form.get('allergens').split(',')
+            allergens = [allergen.strip().lower() for allergen in allergens]
+            results = search_recipes(ingredients, diet_type, allergens)
+            global_results = pickle.dumps(results)
+        except Exception as e:
+            print(f"Error: {e}")
+            traceback.print_exc()
+
+    counters = {
+        'vegan': sum(len(results[cat]) for cat in results) if diet_type == 'vegan' else 0,
+        'vegetarian': sum(len(results[cat]) for cat in results) if diet_type == 'vegetarian' else 0,
+        'omnivore': sum(len(results[cat]) for cat in results) if diet_type == '' else 0
+    }
+
+    return render_template_string("""
+        <html lang="en">
+        <head>
+            <title>Recipes</title>
+        </head>
+        <body>
+            <form method="POST">
+                <label for="ingredients">Enter ingredients separated by commas:</label>
+                <input type="text" id="ingredients" name="ingredients" value="{{ request.form.get('ingredients', '') }}">
+                <label for="diet_type">Select diet type:</label>
+                <select id="diet_type" name="diet_type">
+                    <option value="vegan" {% if diet_type == 'vegan' %}selected{% endif %}>Vegan</option>
+                    <option value="vegetarian" {% if diet_type == 'vegetarian' %}selected{% endif %}>Vegetarian</option>
+                    <option value="" {% if diet_type == '' %}selected{% endif %}>Omnivore</option>
+                </select>
+                <label for="allergens">Enter allergens separated by commas:</label>
+                <input type="text" id="allergens" name="allergens" value="{{ request.form.get('allergens', '') }}">
+                <input type="submit" value="Search">
+            </form>
+            <form method="GET">
+                <button type="submit">New search</button>
+            </form>
+            {% if diet_type == 'vegan' and counters['vegan'] > 0 %}
+                <h2>Vegan Results ({{ counters['vegan'] }})</h2>
+            {% elif diet_type == 'vegetarian' and counters['vegetarian'] > 0 %}
+                <h2>Vegetarian Results ({{ counters['vegetarian'] }})</h2>
+            {% elif diet_type == '' and counters['omnivore'] > 0 %}
+                <h2>Omnivore Results ({{ counters['omnivore'] }})</h2>
+            {% endif %}
+            {% for category, recipes in results.items() %}
+                {% if recipes %}
+                    <h3>{{ category.replace('_', ' ').capitalize() }}</h3>
+                    <ul>
+                    {% for recipe in recipes %}
+                        <li>
+                            <a href="/recipe?name={{ recipe['name'] }}&category={{ category }}">{{ recipe['name'] }}</a>
+                        </li>
+                    {% endfor %}
+                    </ul>
+                {% endif %}
+            {% endfor %}
+        </body>
+        </html>
+    """, results=results, counters=counters, diet_type=diet_type)
+
+@app.route('/recipe')
+def show_recipe():
+    name = request.args.get('name')
+    category = request.args.get('category')
+    global global_results
+
+    if category and name:
+        results = pickle.loads(global_results)
+        if category in results:
+            recipe = next((r for r in results[category] if r['name'] == name), None)
+            if recipe:
+                return render_template_string("""
+                    <html lang="en">
+                    <head>
+                        <title>{{ recipe['name'] }}</title>
+                    </head>
+                    <body>
+                        <h2>{{ recipe['name'] }}</h2>
+                        <img src="{{ recipe['image'] }}" alt="{{ recipe['name'] }}" style="width:200px;">
+                        <p>Ingredients: {{ recipe['ingredients'] | join(', ') }}</p>
+                        {% if recipe['missing'] %}
+                            <p>Missing ingredients: {{ recipe['missing'] | join(', ') }}</p>
+                        {% else %}
+                            <p>All ingredients are available!</p>
+                        {% endif %}
+                        <a href="{{ recipe['link'] }}" target="_blank">Go to full recipe</a>
+                        <br>
+                        <a href="/">Go back</a>
+                    </body>
+                    </html>
+                """, recipe=recipe)
+    return redirect(url_for('index'))
+
+if __name__ == '__main__':
+    ngrok.set_auth_token("2i0XZcA7Zlw5Ua2ExWxGTn1g0ek_6CsrpstqmHg6zocKvzMx7")
+
+    ngrok.kill()
+
+    def run_flask():
+        app.run(port=5000)
+
+    thread = threading.Thread(target=run_flask)
+    thread.start()
+
+    time.sleep(5)
+
+    try:
+        public_url = ngrok.connect(5000).public_url
+        print(" * ngrok tunnel URL:", public_url)
+    except Exception as e:
+        print(f"Ngrok error: {e}")
+        ngrok.kill()</code>
+            </pre>
+        </section>
+        <section>
+            <h2>Configurazione dell'Ambiente</h2>
+            <p>Per eseguire l'applicazione, segui questi passaggi:</p>
+            <ol>
+                <li>Installa Flask: <code>pip install Flask</code></li>
+                <li>Installa le altre dipendenze: <code>pip install requests pyngrok</code></li>
+                <li>Assicurati di avere un account su <a href="https://ngrok.com/">ngrok</a> e ottieni il tuo token di autenticazione.</li>
+            </ol>
+        </section>
+        <section>
+            <h2>Esecuzione dell'Applicazione</h2>
+            <p>Avvia l'applicazione con il comando:</p>
+            <pre><code>python nome_del_tuo_file.py</code></pre>
+            <p>Una volta avviata, l'applicazione sarà accessibile tramite un URL pubblico fornito da ngrok. Il terminale mostrerà l'URL ngrok, che puoi utilizzare per accedere all'applicazione da qualsiasi browser.</p>
+        </section>
+    </main>
+    <footer>
+        <p>&copy; 2024 Il Tuo Nome</p>
+    </footer>
+</body>
+</html>
